@@ -1,0 +1,65 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "spytroxx/flask-webapp"
+        IMAGE_TAG  = "v${env.BUILD_NUMBER}"
+        ANSIBLE_SERVER = "ansible@172.31.2.42"
+        CONT_NAME = "flask_prod"
+    }
+
+    stages {
+
+        stage('Install Git if missing') {
+            steps {
+                sh '''
+                if ! command -v git >/dev/null 2>&1; then
+                    sudo yum install -y git
+                fi
+                '''
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Spytroxx/python-webapp.git'
+            }
+        }
+
+        stage('Build & Push Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    docker build -t $IMAGE_NAME:$IMAGE_TAG .
+
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    docker push $IMAGE_NAME:$IMAGE_TAG
+
+                    docker rmi $IMAGE_NAME:$IMAGE_TAG || true
+                    docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Upload Playbook') {
+            steps {
+                sshagent(['ansible']) {
+                    sh "scp -o StrictHostKeyChecking=no ansible/deploy.yml $ANSIBLE_SERVER:/etc/ansible/playbooks/deploy.yml"
+                }
+            }
+        }
+
+        stage('Deploy with Ansible') {
+            steps {
+                sshagent(['ansible']) {
+                    sh """
+                    ssh -o StrictHostKeyChecking=no $ANSIBLE_SERVER \
+                    'ansible-playbook /etc/ansible/playbooks/deploy.yml \
+                    --extra-vars "docker_image=$IMAGE_NAME docker_tag=$IMAGE_TAG container_name=$CONT_NAME"'
+                    """
+                }
+            }
+        }
+    }
+}
